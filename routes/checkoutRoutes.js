@@ -38,9 +38,10 @@ router.post("/", checkoutLimiter, async (req, res) => {
       }
     }
 
-    // Server-side shipping validation
+    // Server-side shipping validation (only when companyId is a valid ObjectId)
     let shippingSnapshot = null;
-    if (shippingInput?.companyId && shippingInput?.region) {
+    const isValidObjectId = (id) => /^[a-f\d]{24}$/i.test(id);
+    if (shippingInput?.companyId && shippingInput?.region && isValidObjectId(shippingInput.companyId)) {
       const cartTotal = Number(total) || 0;
       const verified = await calculateShippingPrice(
         shippingInput.companyId,
@@ -61,6 +62,20 @@ router.post("/", checkoutLimiter, async (req, res) => {
         deliveryMinDays: verified.deliveryMinDays,
         deliveryMaxDays: verified.deliveryMaxDays,
         region: shippingInput.region,
+        city: shippingInput.city || "",
+      };
+    } else if (shippingInput?.companyId && shippingInput?.companyName) {
+      // Fallback: store shipping as-is when companyId is a slug (not ObjectId)
+      shippingSnapshot = {
+        companyId: shippingInput.companyId,
+        companyName: shippingInput.companyName,
+        logo: shippingInput.logo || "",
+        price: Number(shippingInput.price) || 0,
+        originalPrice: Number(shippingInput.originalPrice) || 0,
+        isFree: shippingInput.isFree ?? true,
+        deliveryMinDays: shippingInput.deliveryMinDays || null,
+        deliveryMaxDays: shippingInput.deliveryMaxDays || null,
+        region: shippingInput.region || "",
         city: shippingInput.city || "",
       };
     }
