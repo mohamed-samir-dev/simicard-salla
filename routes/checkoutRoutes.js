@@ -28,7 +28,7 @@ const checkoutLimiter = rateLimit({
 router.post("/", checkoutLimiter, async (req, res) => {
   try {
     const { whatsapp, nationalId, shipping: shippingInput, items, total } = req.body;
-    if (whatsapp || nationalId) {
+    if (process.env.NODE_ENV === "production" && (whatsapp || nationalId)) {
       const since = new Date(Date.now() - 15 * 60 * 1000);
       const filter = { createdAt: { $gte: since } };
       if (whatsapp) filter.whatsapp = whatsapp;
