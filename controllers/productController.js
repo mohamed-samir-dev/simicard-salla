@@ -1,5 +1,20 @@
 const Product = require("../models/Product");
 
+// In-memory cache — TTL 60 ثانية
+const cache = new Map();
+const CACHE_TTL = 60 * 1000;
+
+function getCached(key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL) { cache.delete(key); return null; }
+  return entry.data;
+}
+function setCached(key, data) {
+  cache.set(key, { data, ts: Date.now() });
+}
+exports.invalidateCache = () => cache.clear();
+
 function normalizeArabic(str) {
   return str
     .replace(/[أإآا]/g, "ا")
@@ -19,22 +34,28 @@ exports.getProducts = async (req, res) => {
     const sortObj = sort === "duration_desc" ? { warrantyYears: -1 } : { createdAt: -1 };
 
     if (!q) {
-      let cursor = sort === "price_desc"
-        ? Product.aggregate([
-            { $match: query },
-            { $addFields: { effectivePrice: { $ifNull: ["$salePrice", "$originalPrice"] } } },
-            { $sort: { effectivePrice: -1 } },
-            ...(limit ? [{ $limit: parseInt(limit) }] : []),
-          ])
-        : Product.find(query).sort(sortObj).limit(limit ? parseInt(limit) : 0);
-      return res.json(await cursor);
+      const cacheKey = `products:${brand||''}:${category||''}:${limit||''}:${sort||''}`;
+      const cached = getCached(cacheKey);
+      if (cached) return res.json(cached);
+
+      let result;
+      if (sort === "price_desc") {
+        result = await Product.aggregate([
+          { $match: query },
+          { $addFields: { effectivePrice: { $ifNull: ["$salePrice", "$originalPrice"] } } },
+          { $sort: { effectivePrice: -1 } },
+          ...(limit ? [{ $limit: parseInt(limit) }] : []),
+        ]);
+      } else {
+        result = await Product.find(query).sort(sortObj).limit(limit ? parseInt(limit) : 0).lean();
+      }
+      setCached(cacheKey, result);
+      return res.json(result);
     }
 
     const normalized = normalizeArabic(q);
-    const products = await Product.find(query).sort(sortObj);
-    const filtered = products.filter((p) =>
-      normalizeArabic(p.name).includes(normalized)
-    );
+    const products = await Product.find(query).sort(sortObj).lean();
+    const filtered = products.filter((p) => normalizeArabic(p.name).includes(normalized));
     res.json(filtered);
   } catch (err) {
     console.error("getProducts error:", err);
@@ -62,17 +83,20 @@ exports.getProduct = async (req, res) => {
 
 exports.createProduct = async (req, res) => {
   const product = await Product.create(req.body);
+  exports.invalidateCache();
   res.status(201).json(product);
 };
 
 exports.updateProduct = async (req, res) => {
   const product = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true });
   if (!product) return res.status(404).json({ message: "Product not found" });
+  exports.invalidateCache();
   res.json(product);
 };
 
 exports.deleteProduct = async (req, res) => {
   const product = await Product.findByIdAndDelete(req.params.id);
   if (!product) return res.status(404).json({ message: "Product not found" });
+  exports.invalidateCache();
   res.json({ message: "Product deleted" });
 };
