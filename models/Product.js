@@ -35,8 +35,8 @@ const productSchema = new mongoose.Schema(
       policy: String,
     },
     taxIncluded: { type: Boolean, default: true },
-    category: { type: String },
-    subCategory: { type: String },
+    category: { type: String, index: true },
+    subCategory: { type: String, index: true },
     brand: { type: String },
     inStock: { type: Boolean, default: true },
     isFeatured: { type: Boolean, default: false },
@@ -48,6 +48,10 @@ const productSchema = new mongoose.Schema(
     toObject: { virtuals: true },
   }
 );
+
+productSchema.index({ brand: 1 });
+productSchema.index({ category: 1 });
+productSchema.index({ subCategory: 1 });
 
 productSchema.virtual("discountPercent").get(function () {
   if (this.salePrice != null && this.salePrice !== this.originalPrice) {

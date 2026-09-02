@@ -53,11 +53,21 @@ const COMPANY_TEXT_FIELDS = [
   "phone", "whatsapp", "website", "email",
   "currencyAr", "currencyEn", "taxNumber",
   "shippingCompany", "paymentMethod", "details",
-  "qrLink", "link1", "link1Type", "link2", "link2Type",
+  "qrLink", "qrLinkType", "qrFile",
+  "link1", "link1Type", "file1",
+  "link2", "link2Type", "file2",
 ];
 
 const ALLOWED_PAYMENT_METHODS = ["حوالات بنكية فقط", "بطاقة بنكية فقط"];
 const ALLOWED_LINK_TYPES = ["link", "file"];
+const ALLOWED_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+const ALLOWED_DOC_MIMES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+];
 
 function validateCompanyBody(body) {
   const errors = [];
@@ -75,6 +85,8 @@ function validateCompanyBody(body) {
     errors.push("نوع الرابط 1 غير مسموح");
   if (body.link2Type && !ALLOWED_LINK_TYPES.includes(body.link2Type))
     errors.push("نوع الرابط 2 غير مسموح");
+  if (body.qrLinkType && !ALLOWED_LINK_TYPES.includes(body.qrLinkType))
+    errors.push("نوع رابط QR غير مسموح");
   const maxLen = { nameAr: 200, nameEn: 200, addressAr: 500, addressEn: 500, details: 2000, taxNumber: 50 };
   for (const [field, max] of Object.entries(maxLen)) {
     if (body[field] && typeof body[field] === "string" && body[field].length > max)
@@ -277,20 +289,49 @@ router.delete("/company/image/:field", authMiddleware, writeLimiter, async (req,
   }
 });
 
-// GET /api/admin/company
-router.get("/company", async (req, res) => {
+// GET /api/admin/company (admin — full data, auth required)
+router.get("/company", authMiddleware, async (req, res) => {
   try {
-    let company = await Company.findOne();
-    if (!company) company = await Company.create({});
-    if (company.footerItems.length === 0) {
+    let company = await Company.findOne().lean();
+    if (!company) {
+      // First-time init: create with default footerItems then return
+      company = (await Company.create({
+        footerItems: [
+          { image: "", linkType: "link", link: "", file: "" },
+          { image: "", linkType: "link", link: "", file: "" },
+          { image: "", linkType: "link", link: "", file: "" },
+        ],
+      })).toObject();
+    } else if (!company.footerItems || company.footerItems.length === 0) {
+      // Migrate existing doc: add default footerItems once
+      await Company.updateOne(
+        { _id: company._id },
+        { $set: { footerItems: [
+          { image: "", linkType: "link", link: "", file: "" },
+          { image: "", linkType: "link", link: "", file: "" },
+          { image: "", linkType: "link", link: "", file: "" },
+        ] } }
+      );
       company.footerItems = [
         { image: "", linkType: "link", link: "", file: "" },
         { image: "", linkType: "link", link: "", file: "" },
         { image: "", linkType: "link", link: "", file: "" },
       ];
-      await company.save();
     }
     res.json(company);
+  } catch {
+    res.status(500).json({ error: "خطأ في الخادم" });
+  }
+});
+
+// GET /api/admin/company/public (public — only fields needed by storefront)
+router.get("/company/public", async (req, res) => {
+  try {
+    const company = await Company.findOne(
+      {},
+      "nameAr nameEn phone whatsapp email website details logo -_id"
+    ).lean();
+    res.json(company || {});
   } catch {
     res.status(500).json({ error: "خطأ في الخادم" });
   }
@@ -352,7 +393,7 @@ router.get("/categories", authMiddleware, async (req, res) => {
 });
 
 // POST /api/admin/main-categories - add new category name (no products yet)
-router.post("/main-categories", authMiddleware, async (req, res) => {
+router.post("/main-categories", authMiddleware, writeLimiter, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: "اسم التصنيف مطلوب" });
@@ -387,7 +428,7 @@ router.get("/main-categories/extra", authMiddleware, async (req, res) => {
 });
 
 // PUT /api/admin/main-categories/rename - rename category across all products
-router.put("/main-categories/rename", authMiddleware, async (req, res) => {
+router.put("/main-categories/rename", authMiddleware, writeLimiter, async (req, res) => {
   try {
     const { oldName, newName } = req.body;
     if (!oldName || !newName) return res.status(400).json({ error: "الاسم القديم والجديد مطلوبان" });
@@ -402,11 +443,11 @@ router.put("/main-categories/rename", authMiddleware, async (req, res) => {
 });
 
 // DELETE /api/admin/main-categories/remove - remove category from all products
-router.delete("/main-categories/remove", authMiddleware, async (req, res) => {
+router.delete("/main-categories/remove", authMiddleware, writeLimiter, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: "اسم التصنيف مطلوب" });
-    await Product.updateMany({ category: name }, { $unset: { category: "" } });
+    await Product.updateMany({ subCategory: name }, { $unset: { subCategory: "" } });
     await MainCategory.deleteOne({ name });
     res.json({ success: true });
   } catch {
@@ -498,8 +539,11 @@ router.delete("/sub-categories/remove", authMiddleware, async (req, res) => {
 // GET /api/admin/sub-categories/settings
 router.get("/sub-categories/settings", authMiddleware, async (req, res) => {
   try {
-    const settings = await SubCategorySettings.find();
-    res.json(settings);
+    const [settings, maxDoc] = await Promise.all([
+      SubCategorySettings.find({ category: { $nin: ["__config__", "__brand__", "__brand_config__"] } }),
+      SubCategorySettings.findOne({ category: "__config__", subCategory: "__max__" }),
+    ]);
+    res.json({ settings, max: maxDoc ? maxDoc.order : 4 });
   } catch {
     res.status(500).json({ error: "خطأ في الخادم" });
   }
@@ -541,22 +585,46 @@ router.patch("/sub-categories/settings/order", authMiddleware, async (req, res) 
 });
 
 // POST /api/admin/sub-categories/image/:category - upload custom image for category
+const ALLOWED_IMAGE_MIMES_SUBCAT = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 router.post("/sub-categories/image/:category", authMiddleware, uploadSubCatImage.single("image"), async (req, res) => {
   try {
     const { category } = req.params;
     if (!req.file) return res.status(400).json({ error: "لم يتم رفع صورة" });
-    const doc = await SubCategorySettings.findOne({ category, subCategory: { $ne: "__max__" } });
-    if (doc?.image) await deleteFromCloudinary(doc.image);
-    const result = await uploadToCloudinary(req.file.buffer, "sub-categories");
-    await SubCategorySettings.updateMany(
-      { category, subCategory: { $ne: "__max__" } },
-      { $set: { image: result.secure_url } }
-    );
-    if (!(await SubCategorySettings.findOne({ category, subCategory: { $ne: "__max__" } }))) {
-      await SubCategorySettings.create({ category, subCategory: category, image: result.secure_url });
+    if (!ALLOWED_IMAGE_MIMES_SUBCAT.includes(req.file.mimetype))
+      return res.status(400).json({ error: "نوع الملف غير مسموح، يُقبل فقط: JPEG, PNG, WebP, GIF" });
+
+    // 1. رفع الصورة الجديدة أولاً قبل حذف القديمة
+    let result;
+    try {
+      result = await uploadToCloudinary(req.file.buffer, "sub-categories");
+    } catch (uploadErr) {
+      console.error("Cloudinary upload failed:", uploadErr.message);
+      return res.status(500).json({ error: "فشل رفع الصورة إلى Cloudinary" });
     }
-    res.json({ url: result.secure_url });
-  } catch {
+    const newUrl = result.secure_url;
+
+    // 2. جلب الصورة القديمة وحفظ الجديدة في DB
+    const existingDoc = await SubCategorySettings.findOne({ category, subCategory: { $ne: "__max__" } });
+    const oldUrl = existingDoc?.image || null;
+
+    await SubCategorySettings.findOneAndUpdate(
+      { category, subCategory: category },
+      { $set: { image: newUrl } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    await SubCategorySettings.updateMany(
+      { category, subCategory: { $nin: ["__max__", category] } },
+      { $set: { image: newUrl } }
+    );
+
+    // 3. حذف الصورة القديمة بعد نجاح DB
+    if (oldUrl && oldUrl !== newUrl) {
+      deleteFromCloudinary(oldUrl).catch((e) => console.error("Old image delete failed:", e.message));
+    }
+
+    res.json({ url: newUrl });
+  } catch (err) {
+    console.error("sub-categories/image error:", err.message);
     res.status(500).json({ error: "خطأ في الخادم" });
   }
 });
@@ -564,12 +632,14 @@ router.post("/sub-categories/image/:category", authMiddleware, uploadSubCatImage
 // GET /api/admin/sub-categories/public (public - categories from product.category only)
 router.get("/sub-categories/public", async (req, res) => {
   try {
-    const result = await Product.aggregate([
-      { $match: { category: { $ne: null, $exists: true }, image: { $ne: "", $exists: true } } },
-      { $sort: { createdAt: -1 } },
-      { $group: { _id: "$category", count: { $sum: 1 }, image: { $first: "$image" } } },
+    const [result, customImages] = await Promise.all([
+      Product.aggregate([
+        { $match: { category: { $ne: null, $exists: true }, image: { $ne: "", $exists: true } } },
+        { $group: { _id: "$category", count: { $sum: 1 }, image: { $first: "$image" } } },
+        { $sort: { _id: 1 } },
+      ]),
+      SubCategorySettings.find({ image: { $ne: "" }, subCategory: { $ne: "__max__" } }, { category: 1, image: 1 }),
     ]);
-    const customImages = await SubCategorySettings.find({ image: { $ne: "" }, subCategory: { $ne: "__max__" } });
     const imageMap = {};
     for (const s of customImages) if (s.image) imageMap[s.category] = s.image;
     res.json(result.map((r) => ({ name: r._id, count: r.count, image: imageMap[r._id] || r.image })));
@@ -579,7 +649,7 @@ router.get("/sub-categories/public", async (req, res) => {
 });
 
 // GET /api/admin/sub-categories/home-settings (public)
-router.get("/sub-categories/home-settings", async (req, res) => {
+router.get("/sub-categories/home-settings", writeLimiter, async (req, res) => {
   try {
     const settings = await SubCategorySettings.find({ category: { $ne: "__config__" } }).sort({ order: 1 });
     res.json(settings);
@@ -589,7 +659,7 @@ router.get("/sub-categories/home-settings", async (req, res) => {
 });
 
 // GET /api/admin/sub-categories/max (public)
-router.get("/sub-categories/max", async (req, res) => {
+router.get("/sub-categories/max", writeLimiter, async (req, res) => {
   try {
     const doc = await SubCategorySettings.findOne({ category: "__config__", subCategory: "__max__" });
     res.json({ max: doc ? doc.order : 4 });
@@ -630,7 +700,7 @@ router.get("/brands", authMiddleware, async (req, res) => {
 });
 
 // GET /api/admin/brands/home-settings (public)
-router.get("/brands/home-settings", async (req, res) => {
+router.get("/brands/home-settings", writeLimiter, async (req, res) => {
   try {
     const settings = await SubCategorySettings.find({ category: "__brand__" }).sort({ order: 1 });
     res.json(settings.map((s) => ({ brand: s.subCategory, showInHome: s.showInHome, order: s.order, bannerImages: s.bannerImages || [] })));
@@ -640,10 +710,12 @@ router.get("/brands/home-settings", async (req, res) => {
 });
 
 // POST /api/admin/brands/banner/:brand - upload banner image
-router.post("/brands/banner/:brand", authMiddleware, makeImageUpload().single("image"), async (req, res) => {
+router.post("/brands/banner/:brand", authMiddleware, uploadSubCatImage.single("image"), async (req, res) => {
   try {
     const { brand } = req.params;
     if (!req.file) return res.status(400).json({ error: "لم يتم رفع صورة" });
+    const exists = await Product.findOne({ brand });
+    if (!exists) return res.status(404).json({ error: "البراند غير موجود" });
     const result = await uploadToCloudinary(req.file.buffer, "banners");
     const doc = await SubCategorySettings.findOneAndUpdate(
       { category: "__brand__", subCategory: brand },
@@ -662,6 +734,8 @@ router.delete("/brands/banner/:brand", authMiddleware, async (req, res) => {
     const { brand } = req.params;
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: "الرابط مطلوب" });
+    const exists = await Product.findOne({ brand });
+    if (!exists) return res.status(404).json({ error: "البراند غير موجود" });
     await deleteFromCloudinary(url);
     await SubCategorySettings.updateOne(
       { category: "__brand__", subCategory: brand },
@@ -719,7 +793,7 @@ router.patch("/brands/settings/order", authMiddleware, async (req, res) => {
 });
 
 // GET /api/admin/brands/max (public)
-router.get("/brands/max", async (req, res) => {
+router.get("/brands/max", writeLimiter, async (req, res) => {
   try {
     const doc = await SubCategorySettings.findOne({ category: "__brand_config__", subCategory: "__max__" });
     res.json({ max: doc ? doc.order : 4 });
@@ -756,7 +830,7 @@ router.get("/orders/count", async (req, res) => {
 });
 
 // GET /api/admin/orders
-router.get("/orders", async (req, res) => {
+router.get("/orders", authMiddleware, async (req, res) => {
   try {
     const orders = await Checkout.find().sort({ createdAt: -1 });
     res.json(orders);
@@ -1078,78 +1152,195 @@ router.put("/products/:id", authMiddleware, uploadProductFieldsEdit.fields([{ na
 });
 
 // POST /api/admin/company/footer-image/:key  (images: qrImage, img1, img2)
-router.post("/company/footer-image/:key", authMiddleware, uploadFooterImg.single("image"), async (req, res) => {
+router.post("/company/footer-image/:key", authMiddleware, uploadLimiter, uploadFooterImg.single("image"), async (req, res) => {
   try {
     const { key } = req.params;
     if (!["qrImage", "img1", "img2"].includes(key)) return res.status(400).json({ error: "حقل غير مسموح" });
     if (!req.file) return res.status(400).json({ error: "لم يتم رفع صورة" });
+    if (!ALLOWED_IMAGE_MIMES.includes(req.file.mimetype))
+      return res.status(400).json({ error: "نوع الملف غير مسموح، يُقبل فقط: JPEG, PNG, WebP, GIF" });
+
+    // 1. Upload new image first
+    let result;
+    try {
+      result = await uploadToCloudinary(req.file.buffer, "company");
+    } catch (uploadErr) {
+      console.error("Cloudinary upload failed:", uploadErr.message);
+      return res.status(500).json({ error: "فشل رفع الصورة إلى Cloudinary" });
+    }
+    const newUrl = result.secure_url;
+
+    // 2. Save new URL to DB
     let company = await Company.findOne();
     if (!company) company = await Company.create({});
-    await deleteFromCloudinary(company[key]);
-    const result = await uploadToCloudinary(req.file.buffer, "company");
-    company[key] = result.secure_url;
-    await company.save();
-    res.json({ url: company[key] });
-  } catch {
+    const oldUrl = company[key];
+    company[key] = newUrl;
+    try {
+      await company.save();
+    } catch (dbErr) {
+      deleteFromCloudinary(newUrl).catch((e) => console.error("Orphan cleanup failed:", e.message));
+      return res.status(500).json({ error: "فشل حفظ البيانات" });
+    }
+
+    // 3. Delete old image only after DB success
+    if (oldUrl) {
+      deleteFromCloudinary(oldUrl).catch((e) => console.error("Old image delete failed:", e.message));
+    }
+
+    res.json({ url: newUrl });
+  } catch (err) {
+    console.error("footer-image upload error:", err.message);
     res.status(500).json({ error: "خطأ في الخادم" });
   }
 });
 
-// POST /api/admin/company/footer-file/:key  (files: file1, file2)
-router.post("/company/footer-file/:key", authMiddleware, uploadDoc.single("file"), async (req, res) => {
+// POST /api/admin/company/footer-file/:key  (files: qrFile, file1, file2)
+router.post("/company/footer-file/:key", authMiddleware, uploadLimiter, uploadDoc.single("file"), async (req, res) => {
   try {
     const { key } = req.params;
-    if (!["file1", "file2"].includes(key)) return res.status(400).json({ error: "حقل غير مسموح" });
+    if (!["qrFile", "file1", "file2"].includes(key)) return res.status(400).json({ error: "حقل غير مسموح" });
     if (!req.file) return res.status(400).json({ error: "لم يتم رفع ملف" });
+    if (!ALLOWED_DOC_MIMES.includes(req.file.mimetype))
+      return res.status(400).json({ error: "نوع الملف غير مسموح، يُقبل فقط: PDF, Word, Excel" });
+
+    // 1. Upload new file first
+    let result;
+    try {
+      result = await uploadToCloudinary(req.file.buffer, "docs", { resource_type: "raw" });
+    } catch (uploadErr) {
+      console.error("Cloudinary upload failed:", uploadErr.message);
+      return res.status(500).json({ error: "فشل رفع الملف إلى Cloudinary" });
+    }
+    const newUrl = result.secure_url;
+
+    // 2. Save new URL to DB
     let company = await Company.findOne();
     if (!company) company = await Company.create({});
-    await deleteFromCloudinary(company[key], "raw");
-    const result = await uploadToCloudinary(req.file.buffer, "docs", { resource_type: "raw" });
-    company[key] = result.secure_url;
-    await company.save();
-    res.json({ url: company[key] });
-  } catch {
+    const oldUrl = company[key];
+    company[key] = newUrl;
+    try {
+      await company.save();
+    } catch (dbErr) {
+      deleteFromCloudinary(newUrl, "raw").catch((e) => console.error("Orphan cleanup failed:", e.message));
+      return res.status(500).json({ error: "فشل حفظ البيانات" });
+    }
+
+    // 3. Delete old file only after DB success
+    if (oldUrl) {
+      deleteFromCloudinary(oldUrl, "raw").catch((e) => console.error("Old file delete failed:", e.message));
+    }
+
+    res.json({ url: newUrl });
+  } catch (err) {
+    console.error("footer-file upload error:", err.message);
     res.status(500).json({ error: "خطأ في الخادم" });
   }
 });
 
 // POST /api/admin/company/footer-items/image/:index
-router.post("/company/footer-items/image/:index", authMiddleware, uploadFooterImg.single("image"), async (req, res) => {
+router.post("/company/footer-items/image/:index", authMiddleware, uploadLimiter, uploadFooterImg.single("image"), async (req, res) => {
   try {
     const index = parseInt(req.params.index);
     if (!req.file) return res.status(400).json({ error: "لم يتم رفع صورة" });
+    if (!ALLOWED_IMAGE_MIMES.includes(req.file.mimetype))
+      return res.status(400).json({ error: "نوع الملف غير مسموح، يُقبل فقط: JPEG, PNG, WebP, GIF" });
     let company = await Company.findOne();
     if (!company) company = await Company.create({});
     if (isNaN(index) || index < 0 || index >= company.footerItems.length)
       return res.status(400).json({ error: "رقم غير صحيح" });
-    const old = company.footerItems[index]?.image;
-    await deleteFromCloudinary(old);
-    const result = await uploadToCloudinary(req.file.buffer, "company");
-    company.footerItems[index].image = result.secure_url;
+
+    // 1. Upload new image first
+    let result;
+    try {
+      result = await uploadToCloudinary(req.file.buffer, "company");
+    } catch (uploadErr) {
+      console.error("Cloudinary upload failed:", uploadErr.message);
+      return res.status(500).json({ error: "فشل رفع الصورة إلى Cloudinary" });
+    }
+    const newUrl = result.secure_url;
+    const oldUrl = company.footerItems[index]?.image;
+
+    // 2. Save to DB first
+    company.footerItems[index].image = newUrl;
     company.markModified("footerItems");
-    await company.save();
-    res.json({ url: company.footerItems[index].image });
-  } catch {
+    try {
+      await company.save();
+    } catch (dbErr) {
+      deleteFromCloudinary(newUrl).catch((e) => console.error("Orphan cleanup failed:", e.message));
+      return res.status(500).json({ error: "فشل حفظ البيانات" });
+    }
+
+    // 3. Delete old image only after DB success
+    if (oldUrl) {
+      deleteFromCloudinary(oldUrl).catch((e) => console.error("Old image delete failed:", e.message));
+    }
+
+    res.json({ url: newUrl });
+  } catch (err) {
+    console.error("footer-items/image upload error:", err.message);
     res.status(500).json({ error: "خطأ في الخادم" });
   }
 });
 
 // POST /api/admin/company/footer-items/file/:index
-router.post("/company/footer-items/file/:index", authMiddleware, uploadDoc.single("file"), async (req, res) => {
+router.post("/company/footer-items/file/:index", authMiddleware, uploadLimiter, uploadDoc.single("file"), async (req, res) => {
   try {
     const index = parseInt(req.params.index);
     if (!req.file) return res.status(400).json({ error: "لم يتم رفع ملف" });
+    if (!ALLOWED_DOC_MIMES.includes(req.file.mimetype))
+      return res.status(400).json({ error: "نوع الملف غير مسموح، يُقبل فقط: PDF, Word, Excel" });
     let company = await Company.findOne();
     if (!company) company = await Company.create({});
     if (isNaN(index) || index < 0 || index >= company.footerItems.length)
       return res.status(400).json({ error: "رقم غير صحيح" });
-    const old = company.footerItems[index]?.file;
-    await deleteFromCloudinary(old, "raw");
-    const result = await uploadToCloudinary(req.file.buffer, "docs", { resource_type: "raw" });
-    company.footerItems[index].file = result.secure_url;
+
+    // 1. Upload new file first
+    let result;
+    try {
+      result = await uploadToCloudinary(req.file.buffer, "docs", { resource_type: "raw" });
+    } catch (uploadErr) {
+      console.error("Cloudinary upload failed:", uploadErr.message);
+      return res.status(500).json({ error: "فشل رفع الملف إلى Cloudinary" });
+    }
+    const newUrl = result.secure_url;
+    const oldUrl = company.footerItems[index]?.file;
+
+    // 2. Save to DB first
+    company.footerItems[index].file = newUrl;
     company.markModified("footerItems");
+    try {
+      await company.save();
+    } catch (dbErr) {
+      deleteFromCloudinary(newUrl, "raw").catch((e) => console.error("Orphan cleanup failed:", e.message));
+      return res.status(500).json({ error: "فشل حفظ البيانات" });
+    }
+
+    // 3. Delete old file only after DB success
+    if (oldUrl) {
+      deleteFromCloudinary(oldUrl, "raw").catch((e) => console.error("Old file delete failed:", e.message));
+    }
+
+    res.json({ url: newUrl });
+  } catch (err) {
+    console.error("footer-items/file upload error:", err.message);
+    res.status(500).json({ error: "خطأ في الخادم" });
+  }
+});
+
+// DELETE /api/admin/company/footer-file/:field  (delete file from Cloudinary + DB)
+router.delete("/company/footer-file-delete/:field", authMiddleware, writeLimiter, async (req, res) => {
+  try {
+    const { field } = req.params;
+    if (!["qrFile", "file1", "file2"].includes(field)) return res.status(400).json({ error: "حقل غير مسموح" });
+    const company = await Company.findOne();
+    if (!company) return res.json({ success: true });
+    const oldUrl = company[field];
+    company[field] = "";
     await company.save();
-    res.json({ url: company.footerItems[index].file });
+    if (oldUrl) {
+      deleteFromCloudinary(oldUrl, "raw").catch((e) => console.error("Cloudinary delete failed:", e.message));
+    }
+    res.json({ success: true });
   } catch {
     res.status(500).json({ error: "خطأ في الخادم" });
   }
