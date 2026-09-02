@@ -139,7 +139,7 @@ router.post("/", userRateLimit, async (req, res) => {
       const actualPrice = product.salePrice ?? product.originalPrice;
       
       // Verify client-side price matches server-side price
-      if (item.price !== actualPrice) {
+      if (Number(item.price) !== actualPrice) {
         return res.status(400).json({ 
           ok: false, 
           error: `سعر المنتج "${product.name}" تم تعديله. يرجى تحديث السلة` 
