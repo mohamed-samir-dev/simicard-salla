@@ -1469,4 +1469,29 @@ router.patch("/card-field-settings", authMiddleware, async (req, res) => {
   }
 });
 
+// GET /api/admin/maintenance
+router.get("/maintenance", authMiddleware, async (req, res) => {
+  try {
+    const company = await Company.findOne();
+    res.json({ maintenance: company?.maintenanceMode ?? false });
+  } catch {
+    res.status(500).json({ error: "خطأ في الخادم" });
+  }
+});
+
+// POST /api/admin/maintenance
+router.post("/maintenance", authMiddleware, async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== "boolean") return res.status(400).json({ error: "enabled مطلوب" });
+    let company = await Company.findOne();
+    if (!company) company = await Company.create({});
+    company.maintenanceMode = enabled;
+    await company.save();
+    res.json({ success: true, maintenance: enabled });
+  } catch {
+    res.status(500).json({ error: "خطأ في الخادم" });
+  }
+});
+
 module.exports = router;
