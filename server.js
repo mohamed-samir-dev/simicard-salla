@@ -44,6 +44,12 @@ app.use((req, res, next) => {
   const origin = req.get("origin");
   const referer = req.get("referer");
   
+  // Allow internal server-to-server requests
+  const internalSecret = req.get("x-internal-secret");
+  if (internalSecret && internalSecret === process.env.INTERNAL_SECRET) {
+    return next();
+  }
+
   if (!origin && !referer) {
     return res.status(403).json({ ok: false, error: "CSRF: Missing origin/referer" });
   }
