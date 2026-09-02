@@ -50,8 +50,6 @@ const productSchema = new mongoose.Schema(
 );
 
 productSchema.index({ brand: 1 });
-productSchema.index({ category: 1 });
-productSchema.index({ subCategory: 1 });
 
 productSchema.virtual("discountPercent").get(function () {
   if (this.salePrice != null && this.salePrice !== this.originalPrice) {

@@ -329,7 +329,7 @@ router.get("/company/public", async (req, res) => {
   try {
     const company = await Company.findOne(
       {},
-      "nameAr nameEn phone whatsapp email website details logo -_id"
+      "nameAr nameEn phone whatsapp email website details logo qrImage qrLink qrLinkType qrFile img1 link1 link1Type file1 img2 link2 link2Type file2 footerItems -_id"
     ).lean();
     res.json(company || {});
   } catch {
